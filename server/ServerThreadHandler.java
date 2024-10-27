@@ -1,9 +1,14 @@
-import java.io.*;
-import java.net.Socket;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.security.cert.Certificate;
+import java.util.AbstractMap;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
+import java.util.Map.Entry;
 
 /**
- * Classe responsável pelo comportamento das ServerThreads 
+ * Classe responsável pelo comportamento das ServerThreads
  * 
  * @author Martim Pereira fc58223
  * @author João Pereira fc58189
@@ -16,163 +21,62 @@ public class ServerThreadHandler {
     private ObjectInputStream in;
 
     private User user = null;
-    private Device device = null;
-    
+    private String device = null;
+
+    private ServerAuthenticationHandler authHandler;
+
     /**
      * Construtor de um ServerThreadHandler
      */
-    public ServerThreadHandler(Socket sock, SharedInfoSingleton info) {
+    public ServerThreadHandler(SharedInfoSingleton info, ObjectOutputStream out, ObjectInputStream in) {
         this.info = info;
         try {
-            this.out = new ObjectOutputStream(sock.getOutputStream());
-            this.in = new ObjectInputStream(sock.getInputStream());
-        }
-        catch (Exception e) {
+            this.out = out;
+            this.in = in;
+            this.authHandler = new ServerAuthenticationHandler(info, in, out);
+        } catch (Exception e) {
             System.err.println("Error crating IO streams");
         }
     }
-    
+
     /**
-     * Método que processa a autenticação de um cliente
-     *  - Autenticação do utilizador e password
-     *  - Autenticação do device id
-     *  - Autenticação do executável
+     * Método que processa a autenticação de um cliente através de um
+     * AuthenticationHandler
+     * - Autenticação do utilizador e password
+     * - Autenticação do device id
+     * - Autenticação do executável
+     * 
+     * @return true se a autenticação foi bem sucedida
      */
-    protected boolean processAuthentication() {
-        try {
-            userAuthentication();
-            devIdAuthentication();
-            execAuthentication();
-            return true;
-        } catch (Exception e) {
-            System.err.println("Error processing authentication: " + e.getMessage());
+    protected boolean startAuthentication() {
+        AbstractMap.SimpleEntry<User, String> pair = authHandler.processAuthentication();
+
+        if (pair == null) {
+            return false;
         }
-        return false;
+
+        this.user = pair.getKey();
+        this.device = pair.getValue();
+        return true;
+
     }
 
-    /**
-     *  Método que autentica o utilizador e a password
-     * 
-     * @throws IOException
-     * @throws ClassNotFoundException
-     */
-    protected void userAuthentication() throws IOException, ClassNotFoundException {
-        Message msg;
-        do {
-            msg = (Message) in.readObject();
+    /* ----------------------------- Funcionalidades ---------------------------- */
 
-            this.user = info.getUserByName(msg.getUser());
-
-            if (this.user == null) {
-                // nao havia user registado com user:password
-                this.user = new User(msg.getUser(), msg.getPassword());
-                msg.setCode(MessageCode.OK_NEW_USER);
-                info.addUser(this.user);
-            } else {
-                // user já existia
-                if (this.user.getPassword().equals(msg.getPassword())) {
-                    msg.setCode(MessageCode.OK_USER);
-                } else {
-                    msg.setCode(MessageCode.WRONG_PWD);
-                }
-            }
-            this.out.writeObject(msg);
-
-        } while (msg.getCode() == MessageCode.WRONG_PWD);
-        this.user = new User(msg.getUser(), msg.getPassword());
-    }
-
-    /**
-     * Método que autentica o device id
-     * 
-     * @throws IOException
-     * @throws ClassNotFoundException
-     */
-    protected void devIdAuthentication() throws IOException, ClassNotFoundException {
-        Message msg;
-        do {
-            msg = (Message) in.readObject();
-            String user_DevId = this.user.getUserId() + ":" + msg.getDevId();
-            this.device = info.getDeviceByName(user_DevId);
-            if (this.device != null) {
-                if (this.device.isOn()) {
-                    msg.setCode(MessageCode.NOK_DEVID);
-                } else {
-                    msg.setCode(MessageCode.OK_DEVID);
-                    this.device.turnOn();
-                }
-            } else {
-                this.device = new Device(user_DevId, true);
-                info.addDevice(this.device);
-                msg.setCode(MessageCode.OK_DEVID);
-            }
-            this.out.writeObject(msg);
-
-        } while (msg.getCode() == MessageCode.NOK_DEVID);
-        System.out.println("Device " + this.device.getDevName() + " created!");
-    }
-
-    /**
-     * Método que autentica o executável
-     * 
-     * @throws IOException
-     * @throws ClassNotFoundException
-     */
-    protected void execAuthentication() throws IOException, ClassNotFoundException {
-
-        Message msg = (Message) in.readObject();
-
-        String size = String.valueOf(msg.getSize());
-        String exec = msg.getFileName();
-
-        msg.setCode(Utils.checkExec(exec, size));
-
-        out.writeObject(msg);
-    }
-    
-    // ---------------------------------------
-
-
-    /**
-     * Método que recebe uma mensagem
-     * 
-     * @return Message enviada pela socket
-     */
-    protected Message readMessage() {
-        try {
-            return ((Message) this.in.readObject());
-        } catch (ClassNotFoundException | IOException e) {
-            System.err.println("Error reading Message");
-        }
-        return null;
-    }
-
-    /**
-     * Método que envia uma mensagem
-     * 
-     * @param msg Message a enviar
-     */
-    protected void writeMessage(Message msg) {
-        try {
-            this.out.writeObject(msg);
-        } catch (IOException e) {
-            System.err.println("Error writing Message");
-        }
-    }
-
-    
     /**
      * Método encarregue pela criação de um dominio
+     * 
      * @param domainName nomde do dominio a criar
      * @return Message com o resultado da operação
      *         - OK se o dominio foi criado com sucesso
      *         - NOK se o dominio já existir
-     */    
+     */
     protected Message createDomain(String domainName) {
         Domain domain = info.getDomain(domainName);
         Message msg = new Message();
         if (domain != null) {
             msg.setCode(MessageCode.NOK);
+
         } else {
             Domain newDomain = new Domain(domainName, this.user);
             info.addDomain(newDomain);
@@ -184,45 +88,29 @@ public class ServerThreadHandler {
     /**
      * Método encarregue pela adição de um utilizador a um dominio
      * 
-     * @param userid nome do utilizador a adicionar
+     * @param userid     nome do utilizador a adicionar
      * @param domainName nome do dominio ao qual o user será adicionado
      * @return Message com o resultado da operação
      *         - OK se o utilizador foi adicionado com sucesso
      *         - NO_DM se o dominio não existir
      *         - NO_USER se o utilizador não existir
-     *         - NO_PERM se o utilizador não tiver permissões (não é o owner do dominio)
+     *         - NO_PERM se o utilizador não tiver permissões (não é o owner do
+     *         dominio)
      */
-    protected Message addUserToDomain(String userid, String domainName) {
+    protected Message addUserToDomain(String userid, String domainName, byte[] domainKey) {
         Domain domain = info.getDomain(domainName);
         Message msg = new Message();
         if (domain == null) {
             msg.setCode(MessageCode.NO_DM);
         } else {
-            User user = null;
-            synchronized (this) {
-                File file = new File("server/serverFiles/users.txt");
-                try {
-                    BufferedReader bf = new BufferedReader(new FileReader(file));
-                    String line;
-                    while ((line = bf.readLine()) != null) {
-                        String[] parts = line.split(":");
-                        String name = parts[0].trim();
-                        if (name.equals(userid)) {
-                            user = info.getUserByName(userid);
-                            break;
-                        }
-                    }
-                    bf.close();
-                } catch (IOException e) {
-                    System.err.println("Error reading from users.txt");
-                }
-            }
+            User user = info.getUserByName(userid);
+
             if (user == null) {
                 msg.setCode(MessageCode.NO_USER);
             } else if (!domain.isOwner(this.user)) {
                 msg.setCode(MessageCode.NO_PERM);
             } else {
-                domain.addUser(user);
+                domain.addUser(user, domainKey);
                 msg.setCode(MessageCode.OK);
             }
         }
@@ -230,14 +118,42 @@ public class ServerThreadHandler {
     }
 
     /**
+     * Método encarrege pelo retorno de um certificado pertencente a um User
+     * 
+     * @param user nome do utilizador a procurar
+     * @return Message com o resultado da operação
+     */
+    public Message retrieveCertificate(String user) {
+        Message msg = new Message();
+
+        User target = info.getUserByName(user);
+
+        if (target == null) {
+            msg.setCode(MessageCode.NO_USER);
+            return msg;
+        }
+
+        Certificate cert = target.getCertificate();
+        if (cert != null) {
+            msg.setCertificate(cert);
+            msg.setCode(MessageCode.OK);
+        } else {
+            msg.setCode(MessageCode.NO_USER);
+        }
+
+        return msg;
+    }
+
+    /**
      * Método encarregue pela adição de um dispositivo a um dominio
      * 
-     * @param devId nome do dispositivo a registar no dominio
+     * @param devId      nome do dispositivo a registar no dominio
      * @param domainName nome do dominio onde o dispositivo será adicionado
      * @return Message com o resultado da operação
      *         - OK se o dispositivo foi adicionado com sucesso
      *         - NO_DM se o dominio não existir
-     *         - NO_PERM se o utilizador não tiver permissões (não é o owner do dominio)
+     *         - NO_PERM se o utilizador não tiver permissões (não é o owner do
+     *         dominio)
      */
     protected Message registerDevice(String domainName) {
         Domain domain = info.getDomain(domainName);
@@ -247,7 +163,7 @@ public class ServerThreadHandler {
         } else if (!domain.hasUser(this.user.getUserId())) {
             msg.setCode(MessageCode.NO_PERM);
         } else {
-            domain.getDevices().add(this.device);
+            domain.registerDevice(device);
             msg.setCode(MessageCode.OK);
         }
         return msg;
@@ -260,18 +176,44 @@ public class ServerThreadHandler {
      * @return Message com o resultado da operação
      *         - OK se a temperatura foi registada com sucesso
      *         - NOK se a temperatura não for válida (string não é um número)
-     */    
-    protected Message registerTemperature(String temp) {
+     */
+    protected Message registerTemperature(List<String> domains, List<byte[]> temps, List<byte[]> params) {
         Message msg = new Message();
-        try {
-            Float t = Float.parseFloat(temp);
-            this.device.setTemp(t);
-            msg.setCode(MessageCode.OK);
-                        
-        } catch (NumberFormatException e) {
-            msg.setCode(MessageCode.NOK);
+
+        for (int i = 0; i < domains.size(); i++) {
+            Domain d = info.getDomain(domains.get(i));
+            byte[] t = temps.get(i);
+            byte[] p = params.get(i);
+            d.registerTempToDevice(this.device, t, p);
         }
+
+        msg.setCode(MessageCode.OK);
         return msg;
+    }
+
+    /**
+     * Método que retorna a chave de um dominio de um utilizador
+     * 
+     * @param domains  lista de dominios a procurar
+     * @param username nome do utilizador que queremos a key
+     * @return Message com o resultado da operação
+     */
+    public Message retrieveDomainKey(List<String> domains, String username) {
+        Message msg = new Message();
+
+        List<byte[]> keys = new ArrayList<>();
+
+        for (String domain : domains) {
+
+            Domain d = info.getDomain(domain);
+            byte[] domainKey = d.getKeyByUserId(username);
+            keys.add(domainKey);
+
+        }
+
+        msg.setDataList(keys);
+        return msg;
+
     }
 
     /**
@@ -280,44 +222,32 @@ public class ServerThreadHandler {
      * @param data byte array com o contéudo da imagem a registar
      * @return Message com o resultado da operação
      *         - OK se a imagem foi registada com sucesso
-     *         - NOK se a imagem não for válida (data == null) ou se ocorrer um erro ao escrever a imagem
+     *         - NOK se a imagem não for válida (data == null) ou se ocorrer um erro
+     *         ao escrever a imagem
      */
-    protected Message registerImage(byte[] data) {
-        boolean dir = Utils.createDir("server/serverImages");
-        if (!dir) {
-            Message msg = new Message();
-            msg.setCode(MessageCode.NOK);
-            return msg;
-        }
-        
+    protected Message registerImage(List<String> domains, List<byte[]> images, List<byte[]> params) {
         Message msg = new Message();
-        if (data == null) {
-            msg.setCode(MessageCode.NOK);
-        } else {
-            try {
-                synchronized (this) {
-                    String name = device.getDevName().replace(':', '_');
-                    File f = new File("server/serverImages/" + name + ".jpg");
-                    FileOutputStream fos = new FileOutputStream(f);
-                    fos.write(data, 0, data.length);
-                    fos.close();
-                }
-                msg.setCode(MessageCode.OK);
-            } catch (IOException e) {
-                msg.setCode(MessageCode.NOK);
-            }
+
+        for (int i = 0; i < domains.size(); i++) {
+            Domain d = info.getDomain(domains.get(i));
+            byte[] img = images.get(i);
+            byte[] p = params.get(i);
+            d.registerImageToDevice(this.device, img, p);
         }
+
+        msg.setCode(MessageCode.OK);
         return msg;
     }
 
     /**
-     * Método encarregue por retornar as temperaturas do dspositivos de um dominio
+     * Método encarregue por retornar as temperaturas do dispositivos de um dominio
      * 
      * @param domainName nome do dominio a procurar
      * @return Message com o resultado da operação
      *         - OK se as temperaturas foram retornadas com sucesso
      *         - NO_DM se o dominio não existir
-     *         - NO_PERM se o utilizador não tiver permissões (não é o owner do dominio)
+     *         - NO_PERM se o utilizador não tiver permissões (não é o owner do
+     *         dominio)
      *         - NO_ID se o dispositivo não existir
      */
     protected Message retriveDomainTemperatures(String domainName) {
@@ -325,17 +255,27 @@ public class ServerThreadHandler {
         Message msg = new Message();
         if (d != null) {
             if (d.hasUser(this.user.getUserId())) {
-                HashMap<String,Float> temps = new HashMap<>();
-                for (Device device : d.getDevices()) {
-                    if (device.getTemp() != null) {
-                        temps.put(device.getDevName(), device.getTemp());
-                    }  
+                HashMap<String, byte[]> temps = new HashMap<>();
+                List<byte[]> params = new ArrayList<>();
+                for (Entry<String, DeviceData> entry : d.getDevices().entrySet()) {
+                    String device = entry.getKey();
+                    DeviceData data = entry.getValue();
+                    if (data.getTemp() != null) {
+                        temps.put(device, data.getTemp());
+                        params.add(data.getTempParams());
+                    }
                 }
                 if (temps.size() == 0) {
-                    msg.setCode(MessageCode.NO_DATA);                    
+                    msg.setCode(MessageCode.NO_DATA);
                 } else {
                     byte[] data = Utils.hashMapToByteArray(temps);
+
+                    // ja foi guardada cifrada pela user pubKey
+                    byte[] domainKey = d.getKeyByUserId(this.user.getUserId());
+
+                    msg.setDomainKey(domainKey);
                     msg.setData(data);
+                    msg.setParams(params);
                     msg.setSize(Long.valueOf(data.length));
                     msg.setCode(MessageCode.OK);
                 }
@@ -355,45 +295,74 @@ public class ServerThreadHandler {
      * @return Message com o resultado da operação
      *         - OK se a imagem foi retornada com sucesso
      *         - NO_ID se o dispositivo não existir
-     *         - NO_PERM se o utilizador não tiver permissões (não é o owner do dominio)
+     *         - NO_PERM se o utilizador não tiver permissões (não é o owner do
+     *         dominio)
      *         - NO_DATA se a imagem não existir
-     */    
+     */
     protected Message retriveImage(String user_devId) {
 
         Message msg = new Message();
 
-        if (this.info.getDeviceByName(user_devId) == null) {
-            msg.setCode(MessageCode.NO_ID);                      
+        if (!this.info.hasDevice(user_devId)) {
+            msg.setCode(MessageCode.NO_ID);
         } else {
             for (Domain domain : info.getDomains()) {
                 if (domain.hasDevice(user_devId) && domain.hasUser(this.user.getUserId())) {
-                    String targetName = user_devId.replace(":", "_");
-                    File f = new File("server/serverImages/" + targetName + ".jpg");
-                    if (f.exists()) {
-                        msg.setCode(MessageCode.OK);                        
-                        byte[] data = Utils.getFileContents("server/serverImages/" + targetName + ".jpg");
-                        msg.setData(data);
-                        msg.setSize(Long.valueOf(data.length));
+                    DeviceData data = domain.getDevices().get(user_devId);
+                    if (data.getImage() != null) {
+                        msg.setData(data.getImage());
+                        msg.setParam(data.getImageParams());
+                        msg.setDomainKey(domain.getKeyByUserId(this.user.getUserId()));
+                        msg.setCode(MessageCode.OK);
                     } else {
                         msg.setCode(MessageCode.NO_DATA);
                     }
                     return msg;
                 }
             }
-            msg.setCode(MessageCode.NO_PERM); 
+            msg.setCode(MessageCode.NO_PERM);
         }
 
         return msg;
-        
+
+    }
+
+    /**
+     * Método que retorna os dominios em que um user se encontra
+     * 
+     * @param username nome do utilizador
+     * @param devId    nome do dispositivo
+     * @return Message com o resultado da operação
+     */
+    protected Message retrieveUserDomains(String username, String devId) {
+
+        Message msg = new Message();
+        List<String> domains = new ArrayList<>();
+        List<byte[]> keys = new ArrayList<>();
+        for (Domain domain : info.getDomains()) {
+            if (domain.hasDevice(username + ":" + devId)) {
+                domains.add(domain.getName());
+                keys.add(domain.getKeyByUserId(username));
+            }
+        }
+
+        if (domains.size() == 0) {
+            msg.setCode(MessageCode.NO_DATA);
+        } else {
+            msg.setDomains(domains);
+            msg.setDataList(keys);
+            msg.setCode(MessageCode.OK);
+        }
+        return msg;
     }
 
     /**
      * Método encarregue por fechar a conexão com o cliente
      */
     protected void close() {
-        this.device.turnOff();
+        this.info.removeDevice(this.device);
         Message msg = new Message();
-        writeMessage(msg);
+        Utils.writeMessage(msg, this.out);
         try {
             if (in != null) {
                 in.close();
@@ -402,8 +371,7 @@ public class ServerThreadHandler {
                 out.close();
             }
         } catch (Exception e) {
-            System.err.println("Error closing IO streams");
+            System.exit(-1);
         }
     }
-
 }

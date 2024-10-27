@@ -1,13 +1,12 @@
 @echo off
 
+REM Create the bin directory if it does not exist
 if not exist bin mkdir bin
-if not exist bin/utils mkdir bin/utils
-if not exist bin/server mkdir bin/server
-if not exist bin/device mkdir bin/device
 
+REM Compiling the java files
 javac -d bin\utils .\utils\*.java
 javac -d bin\server -cp bin\utils .\server\*.java
-javac -d bin\device -cp bin\utils .\device\*.java
+javac -d bin\device -cp bin\utils .\device\*.java 
 
 echo Main-Class: IoTServer > bin\serverManifest.txt
 echo Main-Class: IoTDevice > bin\deviceManifest.txt

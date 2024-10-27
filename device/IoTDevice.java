@@ -1,12 +1,17 @@
-import java.io.*;
-import java.net.Socket;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.io.FileInputStream;
+import java.io.InputStream;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.net.SocketException;
+import java.security.KeyStore;
 import java.util.Scanner;
+import javax.net.SocketFactory;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.SSLSocketFactory;
 
 /**
- * Classe main do dispositivo 
+ * Classe main do dispositivo
+ * 
  * @author Martim Pereira fc58223
  * @author João Pereira fc58189
  * @author Daniel Nunes fc58257
@@ -14,30 +19,35 @@ import java.util.Scanner;
 public class IoTDevice {
 
     private static Scanner sc;
-    private static ObjectInputStream in = null;
-    private static ObjectOutputStream out = null;
 
-    private static boolean closed;
+    private static boolean active;
 
-    private static Socket clientSocket;
+    private static SSLSocket clientSocket;
+
+    private static DeviceCommandHandler handler;
+    private static DeviceAuthenticationHandler authHandler;
 
     /**
      * Método main do dispositivo
+     * 
      * @param args argumentos passados na linha de comandos
      */
     public static void main(String[] args) {
 
-        closed = false;
+        active = true;
         sc = new Scanner(System.in);
 
-        if (args.length == 0 || args.length > 3) {
-            System.out.println("Wrong amount of paramenters!");
+        if (args.length != 6) {
+            System.out.println("Wrong amount of parameters!");
             System.exit(-1);
         }
 
         String serverAddress = args[0];
-        String id = args[1];
-        String username = args[2];
+        String truststoreFile = args[1];
+        String keystoreFile = args[2];
+        String keystorePassword = args[3];
+        String id = args[4];
+        String username = args[5];
 
         String[] addr = serverAddress.split(":");
         String ipHostname = addr[0];
@@ -45,113 +55,33 @@ public class IoTDevice {
         clientSocket = null;
 
         try {
-            clientSocket = new Socket(ipHostname, port);
-
-        } catch (IOException e) {
+            beginConnection(keystorePassword, keystoreFile, truststoreFile, ipHostname, port, username, id);
+        } catch (Exception e) {
             System.err.println(e.getMessage());
+            e.printStackTrace();
             System.exit(-1);
         }
 
         // Dá suporte ao fecho por Ctr+C
         prepareCtrC();
-        System.out.println("Insira a sua password:");
-        Message msg = new Message();
+
         try {
-
-            in = new ObjectInputStream(clientSocket.getInputStream());
-            out = new ObjectOutputStream(clientSocket.getOutputStream());
-
-            String password;
-            boolean authenticated = false;
-
-            do {
-                if (sc.hasNextLine()) {
-                    password = sc.nextLine();
-                    msg.setUser(username);
-                    msg.setPassword(password);
-                    out.writeObject(msg);
-
-                    msg = (Message) in.readObject();
-
-                    System.out.println("Server response: " + msg.getCode() + "\n");
-
-                    // Verifica se o utilizador é novo ou não
-                    switch (msg.getCode()) {
-                        case WRONG_PWD:
-                            System.out.println("Wrong password. Try again:");
-                            break;
-                        case OK_NEW_USER:
-                            authenticated = true;
-                            break;
-                        case OK_USER:
-                            authenticated = true;
-                            break;
-                        default:
-                            System.out.println("Something went wrong...");
-                            System.exit(-1);
-                    }
-                }
-
-            } while (!authenticated);
-
-            boolean id_check = false;
-
-            do {
-
-                msg.clear();
-                msg.setDevId(id);
-                out.writeObject(msg);
-
-                msg = (Message) in.readObject();
-                System.out.println("Server response: " + msg.getCode() + "\n");
-
-                switch (msg.getCode()) {
-                    case NOK_DEVID:
-                        System.out.println("User is already associated with that dev-id.\nTry again:");
-                        if (sc.hasNextLine()) {
-                            id = sc.nextLine();
-                            System.out.println("novo dev_id -> " + id);
-                        }
-                        break;
-                    case OK_DEVID:
-                        id_check = true;
-                        break;
-                    default:
-                        System.out.println("Something went wrong...");
-                        System.exit(-1);
-                }
-
-            } while (!id_check);
-
-            // verificacao executavel
-
-            msg.clear();
-            Path jarPath = Paths.get(IoTDevice.class.getProtectionDomain().getCodeSource().getLocation().toURI());
-            msg.setSize(Files.size(jarPath));
-            msg.setFileName(jarPath.getFileName().toString());
-
-            out.writeObject(msg);
-
-            msg = (Message) in.readObject();
-
-            switch (msg.getCode()) {
-                case NOK_TESTED:
-                    System.out.println("Exec file check failed. Connection closed.");
-                    System.exit(-1);
-                    break;
-                case OK_TESTED:
-                    System.out.println("Exec file check passed!");
-                    break;
-                default:
-                    System.out.println("Something went wrong...");
-                    System.exit(-1);
-                    break;
+            if (!authHandler.startTwoFactorAuthentication(username)) {
+                handler.closeClient();
+                clientSocket.close();
+                System.exit(-1);
             }
 
-            printMenu();
+            if (!authHandler.startExecutableAuthentication(id)) {
+                handler.closeClient();
+                clientSocket.close();
+                System.exit(-1);
+            }
+
+            handler.printMenu();
+
             System.out.println("Command: ");
             do {
-                msg.clear();
 
                 if (sc.hasNextLine()) {
 
@@ -161,37 +91,20 @@ public class IoTDevice {
                     switch (command) {
                         // CREATE <dm> - tenta criar um dominio <dm>
                         case "CREATE":
-
                             if (input.length != 2) {
                                 System.out.println("Wrong format for command CREATE");
-                                System.out.println("Right format -> CREATE");
+                                System.out.println("Right format -> CREATE <dm>");
                             } else {
-
-                                msg.setCommand(command);
-                                msg.setDomain(input[1]);
-                                out.writeObject(msg);
-
-                                msg = (Message) in.readObject();
-                                System.out.println("Response: " + msg.getCode().getDescription());
-
+                                handler.createDomainRequest(input[1]);
                             }
-
                             break;
                         // ADD <user1> <dm> - tenta adicionar utilizador <user1> ao dominio <dm>
                         case "ADD":
-                            if (input.length != 3) {
+                            if (input.length != 4) {
                                 System.out.println("Wrong format for command ADD");
-                                System.out.println("Right format -> ADD <user1> <dm>");
+                                System.out.println("Right format -> ADD <user1> <dm> <password-dominio>");
                             } else {
-                                msg.setCommand(command);
-                                ;
-                                msg.setUser(input[1]);
-                                msg.setDomain(input[2]);
-                                out.writeObject(msg);
-
-                                msg = (Message) in.readObject();
-                                System.out.println("Response: " + msg.getCode().getDescription());
-
+                                handler.addUserToDomainRequest(input[1], input[2], input[3]);
                             }
                             break;
                         // RD <dm> - tenta registar o dispositivo atual no domínio <dm>
@@ -200,12 +113,7 @@ public class IoTDevice {
                                 System.out.println("Wrong format for command RD");
                                 System.out.println("Right format -> RD <dm>");
                             } else {
-                                msg.setCommand(command);
-                                msg.setDomain(input[1]);
-                                out.writeObject(msg);
-
-                                msg = (Message) in.readObject();
-                                System.out.println("Response: " + msg.getCode().getDescription());
+                                handler.registerDeviceRequest(input[1]);
 
                             }
                             break;
@@ -215,162 +123,78 @@ public class IoTDevice {
                                 System.out.println("Wrong format for command ET");
                                 System.out.println("Right format -> ET <float>");
                             } else {
-                                msg.setCommand(command);
-                                msg.setTemp(input[1]);
-                                out.writeObject(msg);
-
-                                msg = (Message) in.readObject();
-                                System.out.println("Response: " + msg.getCode().getDescription());
-
+                                try {
+                                    float temp = Float.parseFloat(input[1]);
+                                    handler.registerTemperatureRequest(temp);
+                                } catch (NumberFormatException e) {
+                                    System.out.println("Invalid temperature!");
+                                }
                             }
 
-                            // EI <filename.jpg> - tenta registar Imagem com o path <filename.jpg> no dispositivo atual.
+                            break;
+                        // EI <filename.jpg> - tenta registar Imagem com o path <filename.jpg> no
+                        // dispositivo atual.
                         case "EI":
                             if (input.length != 2) {
                                 System.out.println("Wrong format for command EI");
                                 System.out.println("Right format -> EI <filename.jpg>");
                             } else {
-
-                                msg.setCommand(command);
-                                msg.setData(Utils.getFileContents(input[1]));
-                                out.writeObject(msg);
-
-                                msg = (Message) in.readObject();
-                                System.out.println("Response: " + msg.getCode().getDescription());
-
+                                handler.registerImageRequest(input[1]);
                             }
 
                             break;
-                        // RT <dm> - tenta obter as últimas medições de temperatura de cada dispositivo do domínio <dm> do servidor
+                        // RT <dm> - tenta obter as últimas medições de temperatura de cada dispositivo
+                        // do domínio <dm> do servidor
                         case "RT":
                             if (input.length != 2) {
                                 System.out.println("Wrong format for command RT");
                                 System.out.println("Right format -> RT <dm>");
                             } else {
-
-                                msg.setCommand(command);
-                                msg.setDomain(input[1]);
-                                out.writeObject(msg);
-
-                                msg = (Message) in.readObject();
-
-                                if (msg.getCode() == MessageCode.OK) {
-
-                                    if (Utils.createDir("device/devicesData")) {
-                                        Utils.writeByteArrayToFile(msg.getData(),
-                                                "device/devicesData/" + input[1] + "_temp.txt");
-
-                                        System.out.println(
-                                                "Response: " + msg.getCode().getDescription() + ", " + msg.getSize()
-                                                        + " (long)." +
-                                                        "File was saved in /device/devicesData with the name "
-                                                        + input[1] + "_temp.txt");
-                                    }
-
-                                } else if (msg.getCode() == MessageCode.NO_PERM) {
-                                    System.out.println("Response: " + msg.getCode().getDescription() + " de leitura");
-                                } else if (msg.getCode() == MessageCode.NO_DATA) {
-                                    System.out.println("Response: " + msg.getCode().getDescription()
-                                            + " # dominio não tem dados de temperatura");
-                                } else {
-                                    System.out.println("Response: " + msg.getCode().getDescription());
-                                }
-
+                                handler.retriveTemperatureRequest(input[1]);
                             }
                             break;
-                        // RI <user-id>:<dev_id> - tenta receber a última Imagem registada pelo dispositivo <userid>:<dev_id> no servidor.
+                        // RI <user-id>:<dev_id> - tenta receber a última Imagem registada pelo
+                        // dispositivo <userid>:<dev_id> no servidor.
                         case "RI":
                             if (input.length != 2) {
                                 System.out.println("Wrong format for command RI");
                                 System.out.println("Right format -> RI <user-id>:<dev_id>");
                             } else {
-
-                                String[] parts = input[1].split(":");
-
-                                if (parts.length == 1) {
-                                    System.out.println("Wrong format for command RI");
-                                    System.out.println("Right format -> RI <user-id>:<dev_id>");
-                                    break;
-                                }
-                                if (parts[1] == "") {
-                                    System.out.println("Wrong format for command RI");
-                                    System.out.println("Right format -> RI <user-id>:<dev_id>");
-                                    break;
-                                }
-
-                                msg.setCommand(command);
-                                msg.setUser(parts[0]);
-                                msg.setDevId(parts[1]);
-                                out.writeObject(msg);
-
-                                msg = (Message) in.readObject();
-
-                                if (msg.getCode() == MessageCode.OK) {
-                                    if (Utils.createDir("device/devicesData")) {
-                                        String filename = input[1].replace(":", "_");
-                                        String path = "device/devicesData/" + filename + ".jpg";
-                                        File received = new File(path);
-                                        FileOutputStream fos = new FileOutputStream(received);
-                                        fos.write(msg.getData(), 0, Integer.parseInt(Long.toString(msg.getSize())));
-                                        System.out.println(
-                                                "Response: " + msg.getCode().getDescription() + ", " + msg.getSize()
-                                                        + " (long)." +
-                                                        "File was saved in /device/devicesData with the name "
-                                                        + filename + ".jpg");
-                                        fos.close();
-                                    }
-                                } else if (msg.getCode() == MessageCode.NO_PERM) {
-                                    System.out.println("Response: " + msg.getCode().getDescription() + " de leitura");
-                                } else if (msg.getCode() == MessageCode.NO_DATA) {
-                                    System.out.println("Response: " + msg.getCode().getDescription()
-                                            + " # esse device id não publicou dados");
-                                } else {
-                                    System.out.println("Response: " + msg.getCode().getDescription());
-                                }
-
+                                handler.retriveImageRequest(input[1]);
+                            }
+                            break;
+                        // MYDOMAINS - tenta obter a lista de domínios em que o dispositivo atual está
+                        case "MYDOMAINS":
+                            if (input.length != 1) {
+                                System.out.println("Wrong format for command MYDOMAINS");
+                                System.out.println("Right format -> MYDOMAINS");
+                            } else {
+                                handler.myDomainsRequest();
                             }
                             break;
                         // HELP - imprime o menu
                         case "HELP":
-                            printMenu();
+                            handler.printMenu();
                             break;
-                        // quanlquer outro comando que não esteja presente no menu não tem qualquer efeito
+                        // quanlquer outro comando que não esteja presente no menu não tem qualquer
+                        // efeito
                         default:
                             System.out.println("Invalid command. Try again!");
                             break;
 
                     }
-
                     System.out.println("Command: ");
-
                 }
+            } while (active);
 
-            } while (!closed);
-
+        } catch (SocketException e) {
+            System.out.println("Server closed connection");
+            System.exit(-1);
         } catch (Exception e) {
-            e.printStackTrace();
-            System.err.println(e.getMessage());
+            System.err.println("Exception in IoTDevice main");
             System.exit(-1);
         }
 
-        System.out.println("All good");
-
-    }
-
-    /**
-     * Método que imprime o menu
-     */
-    private static void printMenu() {
-        System.out.println("Menu:");
-        System.out.println("- CREATE <dm> -> cria dominio");
-        System.out.println("- ADD <user1> <dm> -> Adicionar utilizador <user1> ao domínio <dm>");
-        System.out.println("- RD <dm> -> Registar o Dispositivo atual no domínio <dm>");
-        System.out.println("- ET <float> -> Enviar valor <float> de Temperatura para o servidor.");
-        System.out.println("- EI <filename.jpg> -> Enviar Imagem <filename.jpg> para o servidor.");
-        System.out.println(
-                "- RT <dm> -> Receber as últimas medições de Temperatura de cada dispositivo do domínio <dm>, desde que o utilizador tenha permissões.");
-        System.out.println(
-                "- RI <user-id>:<dev_id> # Receber o ficheiro Imagem do dispositivo <userid>:<dev_id> do servidor, desde que o utilizador tenha permissões.");
     }
 
     /**
@@ -378,18 +202,49 @@ public class IoTDevice {
      */
     private static void prepareCtrC() {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            try {
-                Message msg = new Message();
-                msg.setCommand("EXIT");
-                out.writeObject(msg);
-                closed = true;
-                in.readObject();
-            } catch (ClassNotFoundException | IOException e) {
-                System.out.println("Client closed!");
-            }
-
+            handler.closeClient();
+            active = false;
         }));
     }
 
-        
+    /**
+     * Método que inicia a conexão com o servidor
+     * 
+     * @param keystorePassword password do keystore
+     * @param keystoreFile     ficheiro keystore
+     * @param truststoreFile   ficheiro truststore
+     * @param ipHostname       ip do servidor
+     * @param port             porta do servidor
+     * @param username         username do user
+     * @param id               id do dispositivo
+     * @throws Exception
+     */
+    private static void beginConnection(String keystorePassword, String keystoreFile, String truststoreFile,
+            String ipHostname, int port, String username, String id) throws Exception {
+        System.setProperty("javax.net.ssl.keyStore", keystoreFile);
+        System.setProperty("javax.net.ssl.keyStorePassword", keystorePassword);
+        System.setProperty("javax.net.ssl.keyStoreType", "JCEKS");
+
+        System.setProperty("javax.net.ssl.trustStore", truststoreFile);
+        System.setProperty("javax.net.ssl.trustStorePassword", keystorePassword);
+        System.setProperty("javax.net.ssl.trustStoreType", "JCEKS");
+
+        SocketFactory sf = SSLSocketFactory.getDefault();
+        clientSocket = (SSLSocket) sf.createSocket(ipHostname, port);
+        ObjectInputStream ois = new ObjectInputStream(clientSocket.getInputStream());
+        ObjectOutputStream oos = new ObjectOutputStream(clientSocket.getOutputStream());
+
+        KeyStore keystore = KeyStore.getInstance("JCEKS");
+        try (InputStream keystoreStream = new FileInputStream(keystoreFile)) {
+            keystore.load(keystoreStream, keystorePassword.toCharArray());
+        }
+
+        KeyStore truststore = KeyStore.getInstance("JCEKS");
+        try (InputStream keystoreStream = new FileInputStream(truststoreFile)) {
+            truststore.load(keystoreStream, keystorePassword.toCharArray());
+        }
+
+        handler = new DeviceCommandHandler(ois, oos, username, id, keystore, truststore, keystorePassword);
+        authHandler = new DeviceAuthenticationHandler(ois, oos, keystore, keystorePassword);
+    }
 }

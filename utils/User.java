@@ -1,3 +1,7 @@
+import java.security.cert.Certificate;
+import java.io.Serializable;
+
+
 /**
  * Classe que representa um utilizador
  * 
@@ -5,14 +9,14 @@
  * @author João Pereira fc58189
  * @author Daniel Nunes fc58257
  */
-public class User {
+public class User implements Serializable {
 
     private String user_id;
-    private String password;
+    private Certificate certificate;
 
-    public User(String user_id, String password) {
+    public User(String user_id, Certificate certificate) {
         this.user_id = user_id;
-        this.password = password;
+        this.certificate = certificate;
     }
 
     @Override
@@ -51,11 +55,11 @@ public class User {
      * @return String com o nome do utilizador
      */
     public String getUserId() {
-        return user_id;
+        return this.user_id;
     }
 
-    public String getPassword() {
-        return password;
+    public Certificate getCertificate() {
+        return this.certificate;
     }
 
     @Override
